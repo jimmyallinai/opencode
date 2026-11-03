@@ -731,3 +731,93 @@ test("space does not select a single-choice option", async () => {
     prompt.app.renderer.destroy()
   }
 })
+
+test("ctrl+z still suspends while a question form is open", async () => {
+  await using tmp = await tmpdir()
+  const calls: string[] = []
+  const state = path.join(tmp.path, "state")
+  await mkdir(state, { recursive: true })
+  const config = createTuiResolvedConfig()
+  const events = createEventStream()
+  const transport = createFetch(() => {
+    throw new Error("unexpected fetch")
+  }, events)
+  const form = {
+    id: "frm_question",
+    sessionID: "ses_test",
+    title: "Questions",
+    fields: [
+      {
+        key: "q0",
+        type: "string",
+        title: "Pick one",
+        description: "Which option?",
+        options: [{ value: "a", label: "Option A" }],
+      },
+    ],
+  } satisfies FormWithLocation
+  const { FormPrompt } = await import("../../../src/routes/session/form")
+
+  function SuspendProbe() {
+    Keymap.createLayer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "terminal.suspend",
+          title: "Suspend terminal",
+          group: "System",
+          bind: false,
+          run: () => void calls.push("suspend"),
+        },
+      ],
+    }))
+    return null
+  }
+
+  function Harness() {
+    return (
+      <TestTuiContexts
+        directory={tmp.path}
+        paths={{
+          home: tmp.path,
+          state,
+          worktree: tmp.path,
+        }}
+        clipboard={{
+          async read() {
+            return undefined
+          },
+          write() {
+            return Promise.resolve()
+          },
+        }}
+      >
+        <ConfigProvider config={config}>
+          <Keymap.Provider>
+            <SuspendProbe />
+            <ClientProvider api={createApi(transport.fetch)}>
+              <DataProvider directory={process.cwd()}>
+                <ThemeProvider mode="dark" source={emptyThemeSource}>
+                  <ToastProvider>
+                    <FormPrompt form={form} />
+                  </ToastProvider>
+                </ThemeProvider>
+              </DataProvider>
+            </ClientProvider>
+          </Keymap.Provider>
+        </ConfigProvider>
+      </TestTuiContexts>
+    )
+  }
+
+  const app = await testRender(() => <Harness />, { width: 80, height: 20, kittyKeyboard: true })
+  app.renderer.start()
+  try {
+    await app.waitForFrame((frame) => frame.includes("Questions"))
+    app.mockInput.pressKey("z", { ctrl: true })
+    await app.waitFor(() => calls.length === 1)
+    expect(calls).toEqual(["suspend"])
+  } finally {
+    app.renderer.destroy()
+  }
+})

@@ -535,6 +535,15 @@ export function FormPrompt(props: { form: FormWithLocation }) {
 
   onMount(() => onCleanup(keymap.mode.push(FORM_MODE)))
 
+  // The app-wide binding layer only applies in base mode, and this form
+  // pushes its own mode, so without this layer ctrl+z is swallowed while a
+  // question form is open (the permission prompt stays in base mode, which
+  // is why it suspends fine).
+  Keymap.createLayer(() => ({
+    mode: FORM_MODE,
+    bindings: ["terminal.suspend"],
+  }))
+
   Keymap.createLayer(() => ({
     mode: FORM_MODE,
     enabled: !confirm() && answerField() !== undefined,
