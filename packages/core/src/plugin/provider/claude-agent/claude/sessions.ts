@@ -376,8 +376,13 @@ export function registry() {
     const prepare = Effect.fn("ClaudeSessions.prepare")(function* (entry: Entry, request: Request) {
       // Retire an exited or incompatible process first: once we continue its parked turn, open() must not replace it.
       if (entry.process) {
-        const needsRestart = entry.process.session.ended || entry.process.launch !== launch(request)
-        if (needsRestart) yield* stop(entry)
+        const ended = entry.process.session.ended
+        const launchChanged = entry.process.launch !== launch(request)
+        // A host-side launch change must not interrupt a parked turn: its waiting tool results are already in the
+        // prompt, so let the continuation below deliver them and relaunch at the next turn boundary instead.
+        // Real cancellation still interrupts through the aborted check below, and a dead process still restarts.
+        const parked = !ended && entry.process.waiting !== undefined
+        if ((ended || launchChanged) && !parked) yield* stop(entry)
       }
 
       if (!request.sessionID) {

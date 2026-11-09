@@ -147,6 +147,51 @@ export function expectInterrupt(input?: {
   }
 }
 
+// A continuation delivery for a parked tool turn: the SDK answers the recording's tools/call with its
+// real result, and Claude replies with the given text instead of calling another tool. Models the
+// fixed flow for #61695, where a host-side launch change no longer interrupts the parked turn.
+export function expectDelivery(recording: string, text: string): Exchange {
+  const lines = Recorder.load(recording)
+  const call = lines.find(
+    (line) =>
+      line.from === "claude" &&
+      line.message.request?.subtype === "mcp_message" &&
+      line.message.request.message?.method === "tools/call",
+  )
+  if (!call || call.from !== "claude") throw new Error(`No tools/call in ${recording}`)
+  const assistant = lines.find(
+    (line) =>
+      line.from === "claude" &&
+      line.message.type === "assistant" &&
+      line.message.message?.content?.some((block) => block.type === "text"),
+  )
+  const result = lines.find(
+    (line) => line.from === "claude" && line.message.type === "result" && line.message.subtype === "success",
+  )
+  if (!assistant || assistant.from !== "claude" || !result || result.from !== "claude")
+    throw new Error(`No text reply in ${recording}`)
+  const reply = structuredClone(assistant.message)
+  reply.message.content = [{ type: "text", text }]
+  reply.message.id = `msg_${crypto.randomUUID()}`
+  reply.uuid = crypto.randomUUID()
+  const outcome = structuredClone(result.message)
+  if (typeof outcome.result === "string") outcome.result = text
+  return {
+    type: "exchange",
+    input: {
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: call.message.request_id,
+        response: { mcp_response: { jsonrpc: "2.0", result: {}, id: call.message.request.message.id } },
+      },
+    },
+    replies: [reply, outcome],
+    started: Promise.withResolvers<void>(),
+    done: Promise.withResolvers<void>(),
+  }
+}
+
 function replies(step: Input, requestID?: string) {
   return step.replies.map((message) =>
     message.type === "control_response"

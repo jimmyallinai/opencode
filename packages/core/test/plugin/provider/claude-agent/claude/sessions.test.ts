@@ -336,6 +336,44 @@ describe("Claude sessions", () => {
     }),
   )
 
+  it.effect("a host-side launch change while tool results are ready finishes the parked turn instead of interrupting it", () =>
+    Effect.gen(function* () {
+      // #61695: stopping the process here sends an SDK interrupt, so Claude Code records the waiting
+      // call as "The user doesn't want to proceed with this tool use" even though its real result is
+      // already in the prompt. Deliver the result through the continuation and relaunch later.
+      const recorded = FakeClaude.replay("max-steps")
+      const interrupt = recorded.findIndex(
+        (step) => step.type === "exchange" && step.input.request?.subtype === "interrupt",
+      )
+      const claude = FakeClaude.make([
+        ...recorded.slice(0, interrupt),
+        FakeClaude.expectDelivery("max-steps", "STEP-OTTER"),
+        FakeClaude.expectInterrupt(),
+      ])
+      const test = yield* TestSessions.start(claude)
+      const lookup = [{ ...TestTools.tools[0]!, inputSchema: { type: "object" as const, properties: {} } }]
+      const prompt = TestSessions.prompt("Call lookup once, then call it again, then report the marker.")
+      // Step 1: Claude calls lookup and parks waiting for the result.
+      TestTools.append(prompt, yield* TestTools.step(test.model, prompt, lookup), () => ({
+        type: "text",
+        value: "STEP-OTTER",
+      }))
+      // Step 2: the launch key changed (no tools offered), but the result is already in the prompt.
+      const parts = yield* TestTools.step(test.model, prompt, [])
+      expect(TestSessions.text(parts)).toBe("STEP-OTTER")
+      expect(claude.runs).toHaveLength(1)
+      const first = claude.runs[0]!
+      expect(first.received.filter((message) => message.request?.subtype === "interrupt")).toHaveLength(0)
+      const delivered = first.received.filter((message) => message.response?.response?.mcp_response?.result?.content)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]!.response.response.mcp_response.result.content).toEqual([
+        { type: "text", text: "STEP-OTTER" },
+      ])
+      yield* test.registry.close()
+      claude.check()
+    }),
+  )
+
   it.effect("titles use their own task prompt in a throwaway session that leaves the chat alone", () =>
     Effect.gen(function* () {
       const claude = FakeClaude.make([

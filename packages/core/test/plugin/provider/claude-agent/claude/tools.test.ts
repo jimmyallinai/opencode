@@ -317,9 +317,27 @@ describe("Claude tool steps", () => {
     }),
   )
 
-  it.effect("a last step without tools stops the parked turn and resumes with the saved result", () =>
+  it.effect("a last step without tools finishes the parked turn with its saved result, on the same process", () =>
     Effect.gen(function* () {
-      const claude = FakeClaude.make(FakeClaude.replay("max-steps"))
+      // #61695: a host-side launch change no longer interrupts the parked turn to relaunch it; the
+      // waiting result is delivered through the continuation, with the last-step instruction.
+      const recorded = FakeClaude.replay("max-steps")
+      const interrupt = recorded.findIndex(
+        (step) => step.type === "exchange" && step.input.request?.subtype === "interrupt",
+      )
+      const user: FakeClaude.Step = {
+        type: "exchange",
+        input: { type: "user" },
+        replies: [],
+        started: Promise.withResolvers<void>(),
+        done: Promise.withResolvers<void>(),
+      }
+      const claude = FakeClaude.make([
+        ...recorded.slice(0, interrupt),
+        user,
+        FakeClaude.expectDelivery("max-steps", "STEP-OTTER"),
+        FakeClaude.expectInterrupt(),
+      ])
       const test = yield* TestSessions.start(claude)
       const lookup = [{ ...TestTools.tools[0]!, inputSchema: { type: "object" as const, properties: {} } }]
       const prompt = TestSessions.prompt("Call lookup once, then call it again, then report the marker.")
@@ -328,15 +346,19 @@ describe("Claude tool steps", () => {
         value: "STEP-OTTER",
       }))
       prompt.push({ role: "user", content: [{ type: "text", text: "MAXIMUM STEPS REACHED. Respond with text only." }] })
-      yield* TestTools.step(test.model, prompt, [])
-      expect(claude.runs).toHaveLength(2)
-      const final = claude.runs[1]!
-      expect(final.args.some((arg) => arg.startsWith("--resume="))).toBe(true)
-      const init = final.received.find((message) => message.request?.subtype === "initialize").request
-      expect(init.sdkMcpServers).toBeUndefined()
-      expect(JSON.stringify(final.received.find((message) => message.type === "user").message.content)).toContain(
-        "STEP-OTTER",
-      )
+      const parts = yield* TestTools.step(test.model, prompt, [])
+      expect(TestSessions.text(parts)).toBe("STEP-OTTER")
+      expect(claude.runs).toHaveLength(1)
+      const first = claude.runs[0]!
+      expect(first.received.filter((message) => message.request?.subtype === "interrupt")).toHaveLength(0)
+      const delivered = first.received.filter((message) => message.response?.response?.mcp_response?.result?.content)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]!.response.response.mcp_response.result.content).toEqual([
+        { type: "text", text: "STEP-OTTER" },
+      ])
+      const lastUser = first.received.filter((message) => message.type === "user").at(-1)!
+      expect(lastUser.priority).toBe("next")
+      expect(JSON.stringify(lastUser.message.content)).toContain("MAXIMUM STEPS REACHED")
       yield* test.registry.close()
       claude.check()
     }),
